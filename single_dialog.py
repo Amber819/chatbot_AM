@@ -110,7 +110,7 @@ class chatBot(object):
         r = None
         nid = 1
         while True:
-            line = raw_input('--> ').strip().lower()
+            line = input('--> ').strip().lower()
             if line == 'exit':
                 break
             if line == 'restart':
