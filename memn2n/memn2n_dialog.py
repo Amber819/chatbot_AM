@@ -183,6 +183,8 @@ class MemN2NDialog(object):
             u = [u_0]
             for _ in range(self._hops):
                 m_emb = tf.nn.embedding_lookup(self.A, stories)
+                print(m_emb.get_shape())
+                exit()
                 m = tf.reduce_sum(m_emb, 2)
                 # hack to get around no reduce_dot
                 u_temp = tf.transpose(tf.expand_dims(u[-1], -1), [0, 2, 1])
