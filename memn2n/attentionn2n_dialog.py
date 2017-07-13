@@ -38,7 +38,7 @@ def add_gradient_noise(t, stddev=1e-3, name=None):
         return tf.add(t, gn, name=name)
 
 
-class MemN2NDialog(object):
+class AttentionN2NDialog(object):
     """End-To-End Memory Network."""
 
     @staticmethod
@@ -164,7 +164,7 @@ class MemN2NDialog(object):
         self._sess.run(init_op)
 
     def _build_inputs(self):
-        self._stories = tf.placeholder(tf.int32, shape=(None, self._sentence_size), name="stories")
+        self._stories = tf.placeholder(tf.int32, shape=(None, None), name="stories")
         self._answers = tf.placeholder(tf.int32, shape=(None, self._candidate_size), name="answers")
         self._is_training = tf.placeholder(tf.bool, shape=None, name='is_training')
 
@@ -252,8 +252,10 @@ class MemN2NDialog(object):
         Returns:
             loss: floating-point number, the loss computed for the batch
         """
-        feed_dict = {self._stories: stories, self._answers: answers, self._is_training: True}
+        X = np.matrix(stories, dtype='int32')
+        Y = np.matrix(answers, dtype='int32')
 
+        feed_dict = {self._stories: X, self._answers: Y, self._is_training: True}
         loss, _ = self._sess.run(
             [self.loss_op, self.train_op], feed_dict=feed_dict)
         return loss
@@ -269,7 +271,8 @@ class MemN2NDialog(object):
             answers: Tensor (None, vocab_size)
         """
         # TODO:split the \s symbol get right sentence indexes
-        answers = np.zeros(stories.shape, np.int32)
+        stories = np.matrix(stories, dtype='int32')
+        answers = np.zeros((stories.shape[0], self._candidate_size), np.int32)
         feed_dict = {self._stories: stories, self._answers: answers, self._is_training: False}
         return self._sess.run(self.predict_op, feed_dict=feed_dict)
 
@@ -281,12 +284,12 @@ class AttentionModelTest(tf.test.TestCase):
 
     def setUp(self):
         super(AttentionModelTest, self).setUp()
-        rnn_encoder = MemN2NDialog
+        rnn_encoder = AttentionN2NDialog
         self.batch_size = 10
         self.sequence_length = 10
         self.mode = tf.contrib.learn.ModeKeys.TRAIN
         self.params = rnn_encoder.default_params()
-        self.model = MemN2NDialog(**self.params)
+        self.model = AttentionN2NDialog(**self.params)
         self.encode_fn = self.model._inference
     def test_encode(self):
         inputs = np.random.random_integers(0, 30, [self.batch_size, self.sequence_length])

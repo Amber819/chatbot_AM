@@ -6,7 +6,7 @@ import numpy as np
 from six.moves import range
 from datetime import datetime
 # from memn2n.modules import embedding, feedforward, multihead_attention, label_smoothing
-from modules import *
+from .modules import *
 
 def zero_nil_slot(t, name=None):
     """
@@ -35,15 +35,59 @@ def add_gradient_noise(t, stddev=1e-3, name=None):
         return tf.add(t, gn, name=name)
 
 
-class MemN2NDialog(object):
+class ProjectionOp:
+    """ Single layer perceptron
+    Project input tensor on the output dimension
+    """
+    def __init__(self, shape, scope=None, dtype=None):
+        """
+        Args:
+            shape: a tuple (input dim, output dim)
+            scope (str): encapsulate variables
+            dtype: the weights type
+        """
+        assert len(shape) == 2
+
+        self.scope = scope
+
+        # Projection on the keyboard
+        with tf.variable_scope('weights_' + self.scope):
+            self.W_t = tf.get_variable(
+                'weights',
+                shape,
+                # initializer=tf.truncated_normal_initializer()  # TODO: Tune value (fct of input size: 1/sqrt(input_dim))
+                dtype=dtype
+            )
+            self.b = tf.get_variable(
+                'bias',
+                shape[0],
+                initializer=tf.constant_initializer(),
+                dtype=dtype
+            )
+            self.W = tf.transpose(self.W_t)
+
+    def getWeights(self):
+        """ Convenience method for some tf arguments
+        """
+        return self.W, self.b
+
+    def __call__(self, X):
+        """ Project the output of the decoder into the vocabulary space
+        Args:
+            X (tf.Tensor): input value
+        """
+        with tf.name_scope(self.scope):
+            return tf.matmul(X, self.W) + self.b
+
+class SeqN2NDialog(object):
     """End-To-End Memory Network."""
 
     @staticmethod
     def default_params():
         return {
             "batch_size": 10,
-            "vocab_size": 40,
-            "sentence_size": 10,
+            "vocab_size": 30,
+            "sentence_size": 15,
             "embedding_size": 32,
             "num_layers": 2,
             "dropout_rate": 0.1,
@@ -56,13 +100,14 @@ class MemN2NDialog(object):
             "task_id": 6
         }
 
-    def __init__(self, batch_size, vocab_size,num_layers, sentence_size, embedding_size, dropout_rate=0.1,
+    def __init__(self, batch_size, vocab_size, num_layers, sentence_size, embedding_size, dropout_rate=0.1,
                  max_grad_norm=40.0,
                  nonlin=None,
                  initializer=tf.random_normal_initializer(stddev=0.1),
                  optimizer=tf.train.AdamOptimizer(learning_rate=1e-2),
                  session=tf.Session(),
                  name='MemN2N',
+                 candidate_size=15,
                  task_id=6):
         """Creates an End-To-End Memory Network
         Args:
@@ -90,6 +135,7 @@ class MemN2NDialog(object):
         self._num_layers = num_layers
         self._dropout_rate = dropout_rate
         self._sentence_size = sentence_size
+        self._candidate_size = candidate_size
         self._embedding_size = embedding_size
         self._max_grad_norm = max_grad_norm
         self._nonlin = nonlin
@@ -108,10 +154,12 @@ class MemN2NDialog(object):
         logits = self._inference(self._stories, self._answers, self._is_training)
         self.logits = logits
         self.preds = tf.to_int32(tf.arg_max(logits, dimension=-1))
-        self.istarget = tf.to_float(tf.not_equal(self._answers, 0))
-        self.acc = tf.reduce_sum(tf.to_float(tf.equal(self.preds, self._answers)) * self.istarget) / (
+        answers_T = tf.transpose(tf.stack(self._answers, 0))
+        self.istarget = tf.to_float(tf.not_equal(answers_T, 0))
+
+        self.acc = tf.reduce_sum(tf.to_float(tf.equal(self.preds, answers_T)) * self.istarget) / (
             tf.reduce_sum(self.istarget))
-        self.y_smoothed = label_smoothing(tf.one_hot(self._answers, depth=self._vocab_size))
+        self.y_smoothed = label_smoothing(tf.one_hot(answers_T, depth=self._vocab_size))
         loss = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=self.y_smoothed)
         mean_loss = tf.reduce_sum(loss * self.istarget) / (tf.reduce_sum(self.istarget))
 
@@ -122,12 +170,8 @@ class MemN2NDialog(object):
         grads_and_vars = self._opt.compute_gradients(loss_op)
         grads_and_vars = [(tf.clip_by_norm(g, self._max_grad_norm), v)
                           for g, v in grads_and_vars]
-        grads_and_vars = [(add_gradient_noise(g), v) for g,v in grads_and_vars]
-        ngrads_and_vars = []
-        for g, v in grads_and_vars:
-            ngrads_and_vars.append((g, v))
         train_op = self._opt.apply_gradients(
-            ngrads_and_vars, name="train_op")
+            grads_and_vars, name="train_op")
 
         # predict ops
         self.predict_op = self.preds
@@ -143,27 +187,13 @@ class MemN2NDialog(object):
         self._sess.run(init_op)
 
     def _build_inputs(self):
-        self._stories = tf.placeholder(tf.int32, shape=(None, self._sentence_size), name="stories")
-        self._answers = tf.placeholder(tf.int32, shape=(None, self._sentence_size), name="answers")
+        self._stories = [tf.placeholder(tf.int32, [None, ]) for _ in range(self._sentence_size)]
+        self._answers = [tf.placeholder(tf.int32, [None, ]) for _ in range(self._candidate_size)]
         self._is_training = tf.placeholder(tf.bool, shape=None, name='is_training')
 
     def _inference(self, stories, answers, is_training):
 
         with tf.variable_scope("encoder-decoder"):
-            ## Embedding
-            #lookup_table = tf.get_variable('lookup_table',
-                                          # dtype=tf.float32,
-                                           #shape=[self._vocab_size, self._embedding_size],
-                                           #initializer=tf.contrib.layers.xavier_initializer())
-            #lookup_table = tf.concat((tf.zeros(shape=[1, self._embedding_size]),
-                                     # lookup_table[1:, :]), 0)
-            #self.enc = tf.nn.embedding_lookup(lookup_table, stories)
-
-            ## Dropout
-           # self.enc = tf.layers.dropout(self.enc,
-                                        # rate=self._dropout_rate,
-                                        # training=is_training)
-
             def create_rnn_cell():
                 encoDecoCell = tf.contrib.rnn.BasicLSTMCell(  # Or GRUCell, LSTMCell(args.hiddenSize)
                     self._embedding_size,
@@ -171,11 +201,19 @@ class MemN2NDialog(object):
                 return encoDecoCell
 
             encoDecoCell = tf.contrib.rnn.MultiRNNCell(
-                [create_rnn_cell() for _ in range(self.num_layers)],
+                [create_rnn_cell() for _ in range(self._num_layers)],
+            )
+            # outputProjection = ProjectionOp(
+            #     (self._vocab_size, self._embedding_size),
+            #     scope='softmax_projection'
+            # )
+            logits,_ = tf.contrib.legacy_seq2seq.embedding_rnn_seq2seq(
+                stories, answers, encoDecoCell, self._vocab_size,
+                self._vocab_size, embedding_size=self._embedding_size,
+                # output_projection=outputProjection.getWeights()
             )
 
-            logits,_ = tf.contrib.legacy_seq2seq(stories,answers,encoDecoCell)
-        return logits
+        return tf.transpose(tf.stack(logits, 0), (1, 0, 2))
 
     def batch_fit(self, stories, answers, queries=None):
         """Runs the training algorithm over the passed batch
@@ -186,7 +224,12 @@ class MemN2NDialog(object):
         Returns:
             loss: floating-point number, the loss computed for the batch
         """
-        feed_dict = {self._stories: stories, self._answers: answers, self._is_training: True}
+        stories = np.array(stories, dtype='int32').transpose()
+        answers = np.array(answers, dtype='int32').transpose()
+
+        feed_dict = {self._stories[i]: stories[i] for i in range(self._sentence_size)}
+        feed_dict.update({self._answers[i]: answers[i] for i in range(self._candidate_size)})
+        # feed_dict = {self._stories: stories, self._answers: answers, self._is_training: True}
 
         loss, _ = self._sess.run(
             [self.loss_op, self.train_op], feed_dict=feed_dict)
@@ -200,9 +243,12 @@ class MemN2NDialog(object):
         Returns:
             answers: Tensor (None, vocab_size)
         """
-        # TODO:split the \s symbol get right sentence indexes
-        answers = np.zeros(stories.shape, np.int32)
-        feed_dict = {self._stories: stories, self._answers: answers, self._is_training: False}
+        answers = np.zeros((len(stories), self._candidate_size), np.int32)
+        stories = np.array(stories, dtype='int32').transpose()
+        answers = np.array(answers, dtype='int32').transpose()
+        feed_dict = {self._stories[i]: stories[i] for i in range(self._sentence_size)}
+        feed_dict.update({self._answers[i]: answers[i] for i in range(self._candidate_size)})
+
         return self._sess.run(self.predict_op, feed_dict=feed_dict)
 
 
@@ -213,12 +259,12 @@ class AttentionModelTest():
 
     def __init__(self):
         # super(AttentionModelTest, self).setUp()
-        rnn_encoder = MemN2NDialog
+        rnn_encoder = SeqN2NDialog
         self.batch_size = 10
-        self.sequence_length = 10
+        self.sequence_length = 15
         self.mode = tf.contrib.learn.ModeKeys.TRAIN
         self.params = rnn_encoder.default_params()
-        self.model = MemN2NDialog(**self.params)
+        self.model = SeqN2NDialog(**self.params)
 
     def test_encode(self):
         inputs = np.random.random_integers(0, 30, [self.batch_size, self.sequence_length])
@@ -234,13 +280,14 @@ class AttentionModelTest():
         #                               [self.batch_size, self.sequence_length, 32])
 
     def test_batch_pred(self):
-        inputs = np.random.random_integers(0, 30, [self.batch_size, self.sequence_length])
-        inputs2 = np.random.random_integers(0, 30, [self.batch_size, self.sequence_length])
-        # loss = self.model.batch_fit(inputs, inputs2)
-        loss = self.model.predict(inputs)
+        inputs = np.random.random_integers(0, 29, [self.batch_size, self.sequence_length])
+        inputs2 = np.random.random_integers(0, 29, [self.batch_size, self.sequence_length])
+        loss = self.model.batch_fit(inputs, inputs2)
+        # loss = self.model.predict(inputs)
+        print(inputs2)
         print(loss)
 
 if __name__ == '__main__':
     model = AttentionModelTest()
-    model.test_batch_fit()
+    model.test_batch_pred()
     # tf.test.main()
