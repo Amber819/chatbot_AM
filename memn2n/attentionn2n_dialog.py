@@ -5,8 +5,7 @@ import tensorflow as tf
 import numpy as np
 from six.moves import range
 from datetime import datetime
-# from memn2n.modules import embedding, feedforward, multihead_attention, label_smoothing
-from modules import *
+from memn2n.modules import *
 
 def zero_nil_slot(t, name=None):
     """
@@ -69,6 +68,7 @@ class MemN2NDialog(object):
                  optimizer=tf.train.AdamOptimizer(learning_rate=1e-2),
                  session=tf.Session(),
                  name='MemN2N',
+                 candidate_size=29,
                  task_id=6):
         """Creates an End-To-End Memory Network
 
@@ -110,6 +110,7 @@ class MemN2NDialog(object):
         self._dropout_rate = dropout_rate
         self._num_heads = num_heads
         self._sentence_size = sentence_size
+        self._candidate_size = candidate_size
         self._embedding_size = embedding_size
         self._max_grad_norm = max_grad_norm
         self._nonlin = nonlin
@@ -164,7 +165,7 @@ class MemN2NDialog(object):
 
     def _build_inputs(self):
         self._stories = tf.placeholder(tf.int32, shape=(None, self._sentence_size), name="stories")
-        self._answers = tf.placeholder(tf.int32, shape=(None, self._sentence_size), name="answers")
+        self._answers = tf.placeholder(tf.int32, shape=(None, self._candidate_size), name="answers")
         self._is_training = tf.placeholder(tf.bool, shape=None, name='is_training')
 
     def _inference(self, stories, answers, is_training):
@@ -273,25 +274,24 @@ class MemN2NDialog(object):
         return self._sess.run(self.predict_op, feed_dict=feed_dict)
 
 
-class AttentionModelTest():
+class AttentionModelTest(tf.test.TestCase):
     """
     Tests the UnidirectionalRNNEncoder class.
     """
 
-    def __init__(self):
-        # super(AttentionModelTest, self).setUp()
+    def setUp(self):
+        super(AttentionModelTest, self).setUp()
         rnn_encoder = MemN2NDialog
         self.batch_size = 10
         self.sequence_length = 10
         self.mode = tf.contrib.learn.ModeKeys.TRAIN
         self.params = rnn_encoder.default_params()
         self.model = MemN2NDialog(**self.params)
-
+        self.encode_fn = self.model._inference
     def test_encode(self):
         inputs = np.random.random_integers(0, 30, [self.batch_size, self.sequence_length])
         inputs = tf.Variable(initial_value=inputs, dtype=tf.int32)
-        encode_fn = self.model._inference
-        encoder_output = encode_fn(inputs, inputs, is_training=True)
+        encoder_output = self.encode_fn(inputs, inputs, is_training=True)
 
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
@@ -308,6 +308,6 @@ class AttentionModelTest():
         print(loss)
 
 if __name__ == '__main__':
-    model = AttentionModelTest()
-    model.test_batch_fit()
-    # tf.test.main()
+    # model = AttentionModelTest()
+    # model.test_batch_pred()
+    tf.test.main()

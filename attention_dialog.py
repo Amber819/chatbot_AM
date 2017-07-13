@@ -1,7 +1,8 @@
 from __future__ import absolute_import
 from __future__ import print_function
 
-from data_utils import load_dialog_task, vectorize_data, load_candidates, vectorize_candidates, vectorize_candidates_sparse, tokenize
+from data_utils import load_dialog_task, vectorize_data, load_candidates, \
+    vectorize_candidates_sparse, tokenize, vectorize_seq2seq, vectorize_candidates
 from sklearn import metrics
 from memn2n import MemN2NDialog
 from itertools import chain
@@ -37,7 +38,9 @@ print("Started Task:", FLAGS.task_id)
 
 
 class chatBot(object):
-    def __init__(self, data_dir, model_dir, task_id, isInteractive=True, OOV=False, memory_size=50, random_state=None, batch_size=32, learning_rate=0.001, epsilon=1e-8, max_grad_norm=40.0, evaluation_interval=10, hops=3, epochs=200, embedding_size=20):
+    def __init__(self, data_dir, model_dir, task_id, isInteractive=True, OOV=False, memory_size=50, random_state=None,
+                 batch_size=32, learning_rate=0.001, epsilon=1e-8, max_grad_norm=40.0, evaluation_interval=10, hops=3,
+                 epochs=200, embedding_size=20, sentence_size=100):
         self.data_dir = data_dir
         self.task_id = task_id
         self.model_dir = model_dir
@@ -54,7 +57,7 @@ class chatBot(object):
         self.hops = hops
         self.epochs = epochs
         self.embedding_size = embedding_size
-
+        self.sentence_size = sentence_size
         candidates, self.candid2indx = load_candidates(
             self.data_dir, self.task_id)
         self.n_cand = len(candidates)
@@ -66,14 +69,21 @@ class chatBot(object):
             self.data_dir, self.task_id, self.candid2indx, self.OOV)
         data = self.trainData + self.testData + self.valData
         self.build_vocab(data, candidates)
-        # self.candidates_vec=vectorize_candidates_sparse(candidates,self.word_idx)
-        self.candidates_vec = vectorize_candidates(
-            candidates, self.word_idx, self.candidate_sentence_size)
+        self.candidates_vec=vectorize_candidates(candidates,self.word_idx, self.candidate_sentence_size)
+        # self.candidates_vec = vectorize_seq2seq_candidates(
+        #     candidates, self.word_idx, self.candidate_sentence_size)
         optimizer = tf.train.AdamOptimizer(
             learning_rate=self.learning_rate, epsilon=self.epsilon)
         self.sess = tf.Session()
-        self.model = MemN2NDialog(self.batch_size, self.vocab_size, self.n_cand, self.sentence_size, self.embedding_size, self.candidates_vec, session=self.sess,
-                                  hops=self.hops, max_grad_norm=self.max_grad_norm, optimizer=optimizer, task_id=task_id)
+
+        self.model = MemN2NDialog(self.batch_size, self.vocab_size, self.sentence_size, 32,
+                 blocks=6, num_heads=8, dropout_rate=0.1,
+                 max_grad_norm=40.0,
+                 nonlin=None,
+                 optimizer=optimizer,
+                 session=self.sess,
+                 name='MemN2N',
+                 task_id=6)
         self.saver = tf.train.Saver(max_to_keep=50)
 
         self.summary_writer = tf.summary.FileWriter(
@@ -81,30 +91,23 @@ class chatBot(object):
 
     def build_vocab(self, data, candidates):
         """0：<PAD>, 1:<UNK>, 2:<S>, 3:</S>"""
-
         vocab = reduce(lambda x, y: x | y, (set(
             list(chain.from_iterable(s)) + q) for s, q, a in data))
         vocab |= reduce(lambda x, y: x | y, (set(candidate)
                                              for candidate in candidates))
+        extra = ['<PAD>', '<UNK>', '<S>', '</S>']
+        vocab -= set(extra)
         vocab = sorted(vocab)
-        self.word_idx = dict((c, i + 1) for i, c in enumerate(vocab))
-        max_story_size = max(map(len, (s for s, _, _ in data)))
-        mean_story_size = int(np.mean([len(s) for s, _, _ in data]))
-        self.sentence_size = max(
-            map(len, chain.from_iterable(s for s, _, _ in data)))
+        for v in extra:
+            vocab.insert(0, v)
+        self.word_idx = dict((c, i) for i, c in enumerate(vocab))
         self.candidate_sentence_size = max(map(len, candidates))
-        query_size = max(map(len, (q for _, q, _ in data)))
-        self.memory_size = min(self.memory_size, max_story_size)
         self.vocab_size = len(self.word_idx) + 1  # +1 for nil word
-        self.sentence_size = max(
-            query_size, self.sentence_size)  # for the position
         # params
         print("vocab size:", self.vocab_size)
         print("Longest sentence length", self.sentence_size)
         print("Longest candidate sentence length",
               self.candidate_sentence_size)
-        print("Longest story length", max_story_size)
-        print("Average story length", mean_story_size)
 
     def interactive(self):
         context = []
@@ -137,10 +140,11 @@ class chatBot(object):
             nid += 1
 
     def train(self):
-        trainS, trainQ, trainA = vectorize_data(
-            self.trainData, self.word_idx, self.sentence_size, self.batch_size, self.n_cand, self.memory_size)
-        valS, valQ, valA = vectorize_data(
-            self.valData, self.word_idx, self.sentence_size, self.batch_size, self.n_cand, self.memory_size)
+        trainS, trainA = vectorize_seq2seq(
+            self.trainData, self.word_idx, self.sentence_size, self.batch_size, self.candidate_sentence_size)
+        valS, valA = vectorize_seq2seq(
+            self.valData, self.word_idx, self.sentence_size, self.batch_size, self.candidate_sentence_size)
+
         n_train = len(trainS)
         n_val = len(valS)
         print("Training Size", n_train)
@@ -156,13 +160,13 @@ class chatBot(object):
             total_cost = 0.0
             for start, end in batches:
                 s = trainS[start:end]
-                q = trainQ[start:end]
                 a = trainA[start:end]
-                cost_t = self.model.batch_fit(s, q, a)
+                cost_t = self.model.batch_fit(s, a)
                 total_cost += cost_t
+
             if t % self.evaluation_interval == 0:
-                train_preds = self.batch_predict(trainS, trainQ, n_train)
-                val_preds = self.batch_predict(valS, valQ, n_val)
+                train_preds = self.batch_predict(trainS, n_train)
+                val_preds = self.batch_predict(valS, n_val)
                 train_acc = metrics.accuracy_score(
                     np.array(train_preds), trainA)
                 val_acc = metrics.accuracy_score(val_preds, valA)
@@ -202,17 +206,16 @@ class chatBot(object):
                 self.testData, self.word_idx, self.sentence_size, self.batch_size, self.n_cand, self.memory_size)
             n_test = len(testS)
             print("Testing Size", n_test)
-            test_preds = self.batch_predict(testS, testQ, n_test)
+            test_preds = self.batch_predict(testS, n_test)
             test_acc = metrics.accuracy_score(test_preds, testA)
             print("Testing Accuracy:", test_acc)
 
-    def batch_predict(self, S, Q, n):
+    def batch_predict(self, S, n):
         preds = []
         for start in range(0, n, self.batch_size):
             end = start + self.batch_size
             s = S[start:end]
-            q = Q[start:end]
-            pred = self.model.predict(s, q)
+            pred = self.model.predict(s)
             preds += list(pred)
         return preds
 
