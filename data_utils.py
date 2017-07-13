@@ -87,13 +87,10 @@ def parse_dialogs_per_response(lines,candid_dic):
                 # temporal encoding, and utterance/response encoding
                 # data.append((context[:],u[:],candid_dic[' '.join(r)]))
                 data.append((context[:],u[:],a))
-                u.append('$u')
-                r.append('$r')
                 context.append(u)
                 context.append(r)
             else:
                 r=tokenize(line)
-                r.append('$r')
                 context.append(r)
         else:
             # clear context
@@ -187,8 +184,7 @@ def vectorize_seq2seq(data, word_idx, sentence_size, batch_size, candidate_sente
     for i, (story, query, answer) in enumerate(data):
         story.append(query)
         mystory = reduce(lambda x, y: x + y, story)
-        ls = max(0, sentence_size - len(mystory))
-        ss = [word_idx[w] if w in word_idx else 0 for w in mystory] + [0] * ls
+        ss = [word_idx[w] if w in word_idx else 1 for w in mystory]
         newdata.append((ss, query, answer))
     newdata.sort(key=lambda x: len(x[0]), reverse=True)
 
@@ -197,17 +193,64 @@ def vectorize_seq2seq(data, word_idx, sentence_size, batch_size, candidate_sente
             memory_size=max(1,min(sentence_size,len(story)))
 
         # take only the most recent sentences that fit in memory
+        ls = max(0, sentence_size - len(story))
         story.append(3)
+        story = story + [0] * ls
+
         ss = story[::-1][:memory_size][::-1]
 
         # pad to memory_size
         lm = max(0, memory_size - len(ss))
         ss += [0] * lm
 
-        S.append(np.array(ss))
+        S.append(ss)
 
-        answer.append(3)
+        answer.append('</S>')
         la = max(0, candidate_sentence_size - len(answer))
-        a = [word_idx[w] if w in word_idx else 0 for w in answer[-la:]] + [0] * la
-        A.append(np.array(a))
+        a = [word_idx[w] if w in word_idx else 1 for w in answer[-candidate_sentence_size:]] + [0] * la
+        A.append(a)
+    return S, A
+
+
+def vectorize_seq2seq_fix(data, word_idx, sentence_size, batch_size, candidate_sentence_size):
+    """
+    Vectorize stories and queries.
+
+    If a sentence length < sentence_size, the sentence will be padded with 0's.
+
+    If a story length < memory_size, the story will be padded with empty memories.
+    Empty memories are 1-D arrays of length sentence_size filled with 0's.
+
+    The answer array is returned as a one-hot encoding.
+    """
+    S = []
+    A = []
+    data.sort(key=lambda x:len(x[0]),reverse=True)
+
+    newdata = []
+    for i, (story, query, answer) in enumerate(data):
+        story.append(query)
+        mystory = reduce(lambda x, y: x + y, story)
+        ss = [word_idx[w] if w in word_idx else 1 for w in mystory]
+        newdata.append((ss, query, answer))
+    newdata.sort(key=lambda x: len(x[0]), reverse=True)
+    memory_size = sentence_size
+    for i, (story, query, answer) in enumerate(newdata):
+        # take only the most recent sentences that fit in memory
+        ls = max(0, sentence_size - len(story))
+        story.append(3)
+        story = story + [0] * ls
+
+        ss = story[::-1][:memory_size][::-1]
+
+        # pad to memory_size
+        lm = max(0, memory_size - len(ss))
+        ss += [0] * lm
+
+        S.append(ss)
+
+        answer.append('</S>')
+        la = max(0, candidate_sentence_size - len(answer))
+        a = [word_idx[w] if w in word_idx else 1 for w in answer[-candidate_sentence_size:]] + [0] * la
+        A.append(a)
     return S, A

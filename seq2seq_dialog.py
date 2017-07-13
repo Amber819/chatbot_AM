@@ -1,9 +1,10 @@
 from __future__ import absolute_import
 from __future__ import print_function
 
-from data_utils import load_dialog_task, vectorize_data, load_candidates, vectorize_candidates, vectorize_candidates_sparse, tokenize
-from sklearn import metrics
-from memn2n import AttentionN2NDialog
+from data_utils import load_dialog_task, vectorize_data, load_candidates, \
+    vectorize_seq2seq_fix, tokenize, vectorize_seq2seq, vectorize_candidates
+import metrics
+from memn2n import SeqN2NDialog
 from itertools import chain
 from six.moves import range, reduce
 import sys
@@ -18,11 +19,9 @@ tf.flags.DEFINE_float("max_grad_norm", 40.0, "Clip gradients to this norm.")
 tf.flags.DEFINE_integer("evaluation_interval", 10,
                         "Evaluate and print results every x epochs")
 tf.flags.DEFINE_integer("batch_size", 32, "Batch size for training.")
-tf.flags.DEFINE_integer("hops", 3, "Number of hops in the Memory Network.")
 tf.flags.DEFINE_integer("epochs", 200, "Number of epochs to train for.")
 tf.flags.DEFINE_integer("embedding_size", 20,
                         "Embedding size for embedding matrices.")
-tf.flags.DEFINE_integer("memory_size", 50, "Maximum size of memory.")
 tf.flags.DEFINE_integer("task_id", 6, "bAbI task id, 1 <= id <= 6")
 tf.flags.DEFINE_integer("random_state", None, "Random state.")
 tf.flags.DEFINE_string("data_dir", "data/dialog-bAbI-tasks/",
@@ -31,30 +30,28 @@ tf.flags.DEFINE_string("model_dir", "model/",
                        "Directory containing memn2n model checkpoints")
 tf.flags.DEFINE_boolean('train', True, 'if True, begin to train')
 tf.flags.DEFINE_boolean('interactive', False, 'if True, interactive')
-tf.flags.DEFINE_boolean('OOV', False, 'if True, use OOV test set')
 FLAGS = tf.flags.FLAGS
 print("Started Task:", FLAGS.task_id)
 
 
 class chatBot(object):
-    def __init__(self, data_dir, model_dir, task_id, isInteractive=True, OOV=False, memory_size=50, random_state=None, batch_size=32, learning_rate=0.001, epsilon=1e-8, max_grad_norm=40.0, evaluation_interval=10, hops=3, epochs=200, embedding_size=20):
+    def __init__(self, data_dir, model_dir, task_id, isInteractive=True, random_state=None,
+                 batch_size=32, learning_rate=0.001, epsilon=1e-8, max_grad_norm=40.0, evaluation_interval=1,
+                 epochs=200, embedding_size=300, sentence_size=20):
         self.data_dir = data_dir
         self.task_id = task_id
         self.model_dir = model_dir
         # self.isTrain=isTrain
         self.isInteractive = isInteractive
-        self.OOV = OOV
-        self.memory_size = memory_size
         self.random_state = random_state
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.epsilon = epsilon
         self.max_grad_norm = max_grad_norm
         self.evaluation_interval = evaluation_interval
-        self.hops = hops
         self.epochs = epochs
         self.embedding_size = embedding_size
-
+        self.sentence_size = sentence_size
         candidates, self.candid2indx = load_candidates(
             self.data_dir, self.task_id)
         self.n_cand = len(candidates)
@@ -63,46 +60,49 @@ class chatBot(object):
             (self.candid2indx[key], key) for key in self.candid2indx)
         # task data
         self.trainData, self.testData, self.valData = load_dialog_task(
-            self.data_dir, self.task_id, self.candid2indx, self.OOV)
+            self.data_dir, self.task_id, self.candid2indx, False)
         data = self.trainData + self.testData + self.valData
         self.build_vocab(data, candidates)
-        # self.candidates_vec=vectorize_candidates_sparse(candidates,self.word_idx)
-        self.candidates_vec = vectorize_candidates(
-            candidates, self.word_idx, self.candidate_sentence_size)
+        self.candidates_vec=vectorize_candidates(candidates,self.word_idx, self.candidate_sentence_size)
+        # self.candidates_vec = vectorize_seq2seq_candidates(
+        #     candidates, self.word_idx, self.candidate_sentence_size)
         optimizer = tf.train.AdamOptimizer(
             learning_rate=self.learning_rate, epsilon=self.epsilon)
         self.sess = tf.Session()
-        self.model = AttentionN2NDialog(self.batch_size, self.vocab_size, self.n_cand, self.sentence_size, self.embedding_size, self.candidates_vec, session=self.sess,
-                                        hops=self.hops, max_grad_norm=self.max_grad_norm, optimizer=optimizer, task_id=task_id)
+
+        self.model = SeqN2NDialog(self.batch_size, self.vocab_size, 1, self.sentence_size, self.embedding_size,
+                                        dropout_rate=0.1,
+                                        max_grad_norm=40.0,
+                                        nonlin=None,
+                                        optimizer=optimizer,
+                                        session=self.sess,
+                                        name='MemN2N',
+                                        candidate_size=self.candidate_sentence_size,
+                                        task_id=6)
         self.saver = tf.train.Saver(max_to_keep=50)
 
         self.summary_writer = tf.summary.FileWriter(
             self.model.root_dir, self.model.graph_output.graph)
 
     def build_vocab(self, data, candidates):
+        """0：<PAD>, 1:<UNK>, 2:<S>, 3:</S>"""
         vocab = reduce(lambda x, y: x | y, (set(
             list(chain.from_iterable(s)) + q) for s, q, a in data))
         vocab |= reduce(lambda x, y: x | y, (set(candidate)
                                              for candidate in candidates))
-        vocab = sorted(vocab)
-        self.word_idx = dict((c, i + 1) for i, c in enumerate(vocab))
-        max_story_size = max(map(len, (s for s, _, _ in data)))
-        mean_story_size = int(np.mean([len(s) for s, _, _ in data]))
-        self.sentence_size = max(
-            map(len, chain.from_iterable(s for s, _, _ in data)))
-        self.candidate_sentence_size = max(map(len, candidates))
-        query_size = max(map(len, (q for _, q, _ in data)))
-        self.memory_size = min(self.memory_size, max_story_size)
-        self.vocab_size = len(self.word_idx) + 1  # +1 for nil word
-        self.sentence_size = max(
-            query_size, self.sentence_size)  # for the position
+        extra = ['<PAD>', '<UNK>', '<S>', '</S>']
+        vocab -= set(extra)
+        vocab = sorted(vocab)   # the built-in sorted function is guaranteed to be stable
+        vocab = extra + vocab
+        self.word_idx = dict((c, i) for i, c in enumerate(vocab))
+        self.idx_word = dict((i, c) for i, c in enumerate(vocab))
+        self.candidate_sentence_size = max(map(len, candidates)) + 1  # requested for </S> symbol
+        self.vocab_size = len(self.word_idx)  # +1 for nil word
         # params
         print("vocab size:", self.vocab_size)
         print("Longest sentence length", self.sentence_size)
         print("Longest candidate sentence length",
               self.candidate_sentence_size)
-        print("Longest story length", max_story_size)
-        print("Average story length", mean_story_size)
 
     def interactive(self):
         context = []
@@ -135,10 +135,11 @@ class chatBot(object):
             nid += 1
 
     def train(self):
-        trainS, trainQ, trainA = vectorize_data(
-            self.trainData, self.word_idx, self.sentence_size, self.batch_size, self.n_cand, self.memory_size)
-        valS, valQ, valA = vectorize_data(
-            self.valData, self.word_idx, self.sentence_size, self.batch_size, self.n_cand, self.memory_size)
+        trainS, trainA = vectorize_seq2seq_fix(
+            self.trainData, self.word_idx, self.sentence_size, self.batch_size, self.candidate_sentence_size)
+        valS, valA = vectorize_seq2seq_fix(
+            self.valData, self.word_idx, self.sentence_size, self.batch_size, self.candidate_sentence_size)
+
         n_train = len(trainS)
         n_val = len(valS)
         print("Training Size", n_train)
@@ -154,21 +155,23 @@ class chatBot(object):
             total_cost = 0.0
             for start, end in batches:
                 s = trainS[start:end]
-                q = trainQ[start:end]
                 a = trainA[start:end]
-                cost_t = self.model.batch_fit(s, q, a)
+                cost_t = self.model.batch_fit(s, a)
                 total_cost += cost_t
+
             if t % self.evaluation_interval == 0:
-                train_preds = self.batch_predict(trainS, trainQ, n_train)
-                val_preds = self.batch_predict(valS, valQ, n_val)
-                train_acc = metrics.accuracy_score(
+                train_preds = self.batch_predict(trainS, n_train)
+                val_preds = self.batch_predict(valS, n_val)
+                train_acc = metrics.bleu_score(
                     np.array(train_preds), trainA)
-                val_acc = metrics.accuracy_score(val_preds, valA)
+                val_acc = metrics.bleu_score(val_preds, valA)
+                self.sample_output(valS[:30], valA[:30], val_preds[:30])
+
                 print('-----------------------')
                 print('Epoch', t)
                 print('Total Cost:', total_cost)
-                print('Training Accuracy:', train_acc)
-                print('Validation Accuracy:', val_acc)
+                print('Training bleu:', train_acc)
+                print('Validation bleu:', val_acc)
                 print('-----------------------')
 
                 # write summary
@@ -196,23 +199,36 @@ class chatBot(object):
         if self.isInteractive:
             self.interactive()
         else:
-            testS, testQ, testA = vectorize_data(
-                self.testData, self.word_idx, self.sentence_size, self.batch_size, self.n_cand, self.memory_size)
+            testS, testQ, testA = vectorize_seq2seq(
+                self.testData, self.word_idx, self.sentence_size, self.batch_size, self.candidate_sentence_size)
             n_test = len(testS)
             print("Testing Size", n_test)
-            test_preds = self.batch_predict(testS, testQ, n_test)
-            test_acc = metrics.accuracy_score(test_preds, testA)
-            print("Testing Accuracy:", test_acc)
+            test_preds = self.batch_predict(testS, n_test)
+            test_acc = metrics.bleu_score(test_preds, testA)
+            print("Testing bleu:", test_acc)
 
-    def batch_predict(self, S, Q, n):
+    def sample_output(self, H, S, A):
+        for h, s, a in zip(H, S, A):
+            h = [self.idx_word[idx] for idx in h]
+            s = [self.idx_word[idx] for idx in s]
+            a = [self.idx_word[idx] for idx in a]
+            print('--History--:%s\n--answer--:%s\n--Got--:%s\n\n' % (' '.join(h), ' '.join(s), ' '.join(a)))
+
+    def batch_predict(self, S, n):
         preds = []
         for start in range(0, n, self.batch_size):
             end = start + self.batch_size
             s = S[start:end]
-            q = Q[start:end]
-            pred = self.model.predict(s, q)
+            pred = self.model.predict(s)
             preds += list(pred)
-        return preds
+        ret = []
+        for pred in preds:
+            try:
+                index = pred.tolist().index(3)
+            except:
+                index = len(pred)
+            ret.append(pred[:index])
+        return ret
 
     def close_session(self):
         self.sess.close()
@@ -222,7 +238,7 @@ if __name__ == '__main__':
     model_dir = "task" + str(FLAGS.task_id) + "_" + FLAGS.model_dir
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
-    chatbot = chatBot(FLAGS.data_dir, model_dir, FLAGS.task_id, OOV=FLAGS.OOV,
+    chatbot = chatBot(FLAGS.data_dir, model_dir, FLAGS.task_id,
                       isInteractive=FLAGS.interactive, batch_size=FLAGS.batch_size)
     # chatbot.run()
     if FLAGS.train:
