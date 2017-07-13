@@ -5,12 +5,12 @@ import tensorflow as tf
 import numpy as np
 from six.moves import range
 from datetime import datetime
-from memn2n.modules import *
+# from memn2n.modules import embedding, feedforward, multihead_attention, label_smoothing
+from modules import *
 
 def zero_nil_slot(t, name=None):
     """
     Overwrites the nil_slot (first row) of the input Tensor with zeros.
-
     The nil_slot is a dummy slot and should not be trained and influence
     the training algorithm.
     """
@@ -25,11 +25,8 @@ def zero_nil_slot(t, name=None):
 def add_gradient_noise(t, stddev=1e-3, name=None):
     """
     Adds gradient noise as described in http://arxiv.org/abs/1511.06807 [2].
-
     The input Tensor `t` should be a gradient.
-
     The output will be `t` + gaussian noise.
-
     0.001 was said to be a good fixed value for memory networks [2].
     """
     with tf.op_scope([t, stddev], name, "add_gradient_noise") as name:
@@ -48,8 +45,7 @@ class MemN2NDialog(object):
             "vocab_size": 40,
             "sentence_size": 10,
             "embedding_size": 32,
-            "blocks": 2,
-            "num_heads": 2,
+            "num_layers": 2,
             "dropout_rate": 0.1,
             "max_grad_norm": 40.0,
             "nonlin": None,
@@ -60,57 +56,40 @@ class MemN2NDialog(object):
             "task_id": 6
         }
 
-    def __init__(self, batch_size, vocab_size, sentence_size, embedding_size,
-                 blocks=6, num_heads=8, dropout_rate=0.1,
+    def __init__(self, batch_size, vocab_size,num_layers, sentence_size, embedding_size, dropout_rate=0.1,
                  max_grad_norm=40.0,
                  nonlin=None,
                  initializer=tf.random_normal_initializer(stddev=0.1),
                  optimizer=tf.train.AdamOptimizer(learning_rate=1e-2),
                  session=tf.Session(),
                  name='MemN2N',
-                 candidate_size=29,
                  task_id=6):
         """Creates an End-To-End Memory Network
-
         Args:
             batch_size: The size of the batch.
-
             vocab_size: The size of the vocabulary (should include the nil word). The nil word
             one-hot encoding should be 0.
-
             sentence_size: The max size of a sentence in the data. All sentences should be padded
             to this length. If padding is required it should be done with nil one-hot encoding (0).
-
             candidates_size: The size of candidates
-
             memory_size: The max size of the memory. Since Tensorflow currently does not support jagged arrays
             all memories must be padded to this length. If padding is required, the extra memories should be
             empty memories; memories filled with the nil word ([0, 0, 0, ......, 0]).
-
             embedding_size: The size of the word embedding.
-
             max_grad_norm: Maximum L2 norm clipping value. Defaults to `40.0`.
-
             nonlin: Non-linearity. Defaults to `None`.
-
             initializer: Weight initializer. Defaults to `tf.random_normal_initializer(stddev=0.1)`.
-
             optimizer: Optimizer algorithm used for SGD. Defaults to `tf.train.AdamOptimizer(learning_rate=1e-2)`.
-
             encoding: A function returning a 2D Tensor (sentence_size, embedding_size). Defaults to `position_encoding`.
-
             session: Tensorflow Session the model is run with. Defaults to `tf.Session()`.
-
             name: Name of the End-To-End Memory Network. Defaults to `MemN2N`.
         """
 
         self._batch_size = batch_size
         self._vocab_size = vocab_size
-        self._blocks = blocks
+        self._num_layers = num_layers
         self._dropout_rate = dropout_rate
-        self._num_heads = num_heads
         self._sentence_size = sentence_size
-        self._candidate_size = candidate_size
         self._embedding_size = embedding_size
         self._max_grad_norm = max_grad_norm
         self._nonlin = nonlin
@@ -165,90 +144,45 @@ class MemN2NDialog(object):
 
     def _build_inputs(self):
         self._stories = tf.placeholder(tf.int32, shape=(None, self._sentence_size), name="stories")
-        self._answers = tf.placeholder(tf.int32, shape=(None, self._candidate_size), name="answers")
+        self._answers = tf.placeholder(tf.int32, shape=(None, self._sentence_size), name="answers")
         self._is_training = tf.placeholder(tf.bool, shape=None, name='is_training')
 
     def _inference(self, stories, answers, is_training):
 
-        with tf.variable_scope("encoder"):
+        with tf.variable_scope("encoder-decoder"):
             ## Embedding
-            self.enc = embedding(stories,
-                                 vocab_size=self._vocab_size,
-                                 num_units=self._embedding_size,
-                                 scale=True,
-                                 scope="enc_embed")
+            #lookup_table = tf.get_variable('lookup_table',
+                                          # dtype=tf.float32,
+                                           #shape=[self._vocab_size, self._embedding_size],
+                                           #initializer=tf.contrib.layers.xavier_initializer())
+            #lookup_table = tf.concat((tf.zeros(shape=[1, self._embedding_size]),
+                                     # lookup_table[1:, :]), 0)
+            #self.enc = tf.nn.embedding_lookup(lookup_table, stories)
 
             ## Dropout
-            self.enc = tf.layers.dropout(self.enc,
-                                         rate=self._dropout_rate,
-                                         training=is_training)
+           # self.enc = tf.layers.dropout(self.enc,
+                                        # rate=self._dropout_rate,
+                                        # training=is_training)
 
-            ## Blocks
-            for i in range(self._blocks):
-                with tf.variable_scope("num_blocks_{}".format(i)):
-                    ### Multihead Attention
-                    self.enc = multihead_attention(queries=self.enc,
-                                                   keys=self.enc,
-                                                   num_units=self._embedding_size,
-                                                   num_heads=self._num_heads,
-                                                   dropout_rate=self._dropout_rate,
-                                                   is_training=is_training,
-                                                   causality=False)
+            def create_rnn_cell():
+                encoDecoCell = tf.contrib.rnn.BasicLSTMCell(  # Or GRUCell, LSTMCell(args.hiddenSize)
+                    self._embedding_size,
+                )
+                return encoDecoCell
 
-                    ### Feed Forward
-                    self.enc = feedforward(self.enc, num_units=[4 * self._embedding_size, self._embedding_size])
-        with tf.variable_scope("decoder"):
-            ## Embedding
-            self.decoder_inputs = tf.concat((tf.ones_like(answers[:, :1]) * 2, answers[:, :-1]), -1)  # 2:<S>
+            encoDecoCell = tf.contrib.rnn.MultiRNNCell(
+                [create_rnn_cell() for _ in range(self.num_layers)],
+            )
 
-            self.dec = embedding(self.decoder_inputs,
-                                 vocab_size=self._vocab_size,
-                                 num_units=self._embedding_size,
-                                 scale=True,
-                                 scope="dec_embed")
-
-            ## Dropout
-            self.dec = tf.layers.dropout(self.dec,
-                                         rate=self._dropout_rate,
-                                         training=is_training)
-
-            ## Blocks
-            for i in range(self._blocks):
-                with tf.variable_scope("num_blocks_{}".format(i)):
-                    ## Multihead Attention ( self-attention)
-                    self.dec = multihead_attention(queries=self.dec,
-                                                   keys=self.dec,
-                                                   num_units=self._embedding_size,
-                                                   num_heads=self._num_heads,
-                                                   dropout_rate=self._dropout_rate,
-                                                   is_training=is_training,
-                                                   causality=True,
-                                                   scope="self_attention")
-
-                    ## Multihead Attention ( vanilla attention)
-                    self.dec = multihead_attention(queries=self.dec,
-                                                   keys=self.enc,
-                                                   num_units=self._embedding_size,
-                                                   num_heads=self._num_heads,
-                                                   dropout_rate=self._dropout_rate,
-                                                   is_training=is_training,
-                                                   causality=False,
-                                                   scope="vanilla_attention")
-
-                    ## Feed Forward
-                    self.dec = feedforward(self.dec, num_units=[4 * self._embedding_size, self._embedding_size])
-
-        logits = tf.layers.dense(self.dec, self._vocab_size)
+            logits,_ = tf.contrib.legacy_seq2seq(stories,answers,encoDecoCell)
         return logits
 
     def batch_fit(self, stories, answers, queries=None):
         """Runs the training algorithm over the passed batch
-
         Args:
             stories: Tensor (None, sentence_size)
             queries: Tensor (None, sentence_size)
             answers: Tensor (None, vocab_size)
-
         Returns:
             loss: floating-point number, the loss computed for the batch
         """
@@ -260,11 +194,9 @@ class MemN2NDialog(object):
 
     def predict(self, stories, queries=None):
         """Predicts answers as one-hot encoding.
-
         Args:
             stories: Tensor (None, memory_size, sentence_size)
             queries: Tensor (None, sentence_size)
-
         Returns:
             answers: Tensor (None, vocab_size)
         """
@@ -274,24 +206,25 @@ class MemN2NDialog(object):
         return self._sess.run(self.predict_op, feed_dict=feed_dict)
 
 
-class AttentionModelTest(tf.test.TestCase):
+class AttentionModelTest():
     """
     Tests the UnidirectionalRNNEncoder class.
     """
 
-    def setUp(self):
-        super(AttentionModelTest, self).setUp()
+    def __init__(self):
+        # super(AttentionModelTest, self).setUp()
         rnn_encoder = MemN2NDialog
         self.batch_size = 10
         self.sequence_length = 10
         self.mode = tf.contrib.learn.ModeKeys.TRAIN
         self.params = rnn_encoder.default_params()
         self.model = MemN2NDialog(**self.params)
-        self.encode_fn = self.model._inference
+
     def test_encode(self):
         inputs = np.random.random_integers(0, 30, [self.batch_size, self.sequence_length])
         inputs = tf.Variable(initial_value=inputs, dtype=tf.int32)
-        encoder_output = self.encode_fn(inputs, inputs, is_training=True)
+        encode_fn = self.model._inference
+        encoder_output = encode_fn(inputs, inputs, is_training=True)
 
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
@@ -308,6 +241,6 @@ class AttentionModelTest(tf.test.TestCase):
         print(loss)
 
 if __name__ == '__main__':
-    # model = AttentionModelTest()
-    # model.test_batch_pred()
-    tf.test.main()
+    model = AttentionModelTest()
+    model.test_batch_fit()
+    # tf.test.main()

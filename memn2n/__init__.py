@@ -1,2 +1,4 @@
-from __future__ import absolute_import
-from .memn2n_dialog import *
+from .attentionn2n_dialog import *
+from . import modules
+from . import attentionn2n_dialog
+from . import memn2n_dialog
