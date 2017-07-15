@@ -11,6 +11,7 @@ import sys
 import tensorflow as tf
 import numpy as np
 import os
+import datetime
 
 tf.flags.DEFINE_float("learning_rate", 0.001,
                       "Learning rate for Adam Optimizer.")
@@ -37,10 +38,9 @@ print("Started Task:", FLAGS.task_id)
 class chatBot(object):
     def __init__(self, data_dir, model_dir, task_id, isInteractive=True, random_state=None,
                  batch_size=32, learning_rate=0.001, epsilon=1e-8, max_grad_norm=40.0, evaluation_interval=1,
-                 epochs=200, embedding_size=300, sentence_size=20):
+                 epochs=200, embedding_size=128, sentence_size=50):
         self.data_dir = data_dir
         self.task_id = task_id
-        self.model_dir = model_dir
         # self.isTrain=isTrain
         self.isInteractive = isInteractive
         self.random_state = random_state
@@ -63,7 +63,7 @@ class chatBot(object):
             self.data_dir, self.task_id, self.candid2indx, False)
         data = self.trainData + self.testData + self.valData
         self.build_vocab(data, candidates)
-        self.candidates_vec=vectorize_candidates(candidates,self.word_idx, self.candidate_sentence_size)
+        self.candidates_vec=vectorize_candidates(candidates, self.word_idx, self.candidate_sentence_size)
         # self.candidates_vec = vectorize_seq2seq_candidates(
         #     candidates, self.word_idx, self.candidate_sentence_size)
         optimizer = tf.train.AdamOptimizer(
@@ -81,8 +81,11 @@ class chatBot(object):
                                         task_id=6)
         self.saver = tf.train.Saver(max_to_keep=50)
 
-        self.summary_writer = tf.summary.FileWriter(
-            self.model.root_dir, self.model.graph_output.graph)
+        self.model_dir = model_dir + "_" + self.model._name + "_" + FLAGS.model_dir
+        if not os.path.exists(model_dir):
+            os.makedirs(model_dir)
+        # self.summary_writer = tf.summary.FileWriter(
+        #     self.model.root_dir, self.model.graph_output.graph)
 
     def build_vocab(self, data, candidates):
         """0：<PAD>, 1:<UNK>, 2:<S>, 3:</S>"""
@@ -97,10 +100,14 @@ class chatBot(object):
         self.word_idx = dict((c, i) for i, c in enumerate(vocab))
         self.idx_word = dict((i, c) for i, c in enumerate(vocab))
         self.candidate_sentence_size = max(map(len, candidates)) + 1  # requested for </S> symbol
+
+        real_sentence_size = max(map(len, [s for s, q, q in data]))
+
         self.vocab_size = len(self.word_idx)  # +1 for nil word
         # params
         print("vocab size:", self.vocab_size)
-        print("Longest sentence length", self.sentence_size)
+        print("Longest sentence length", real_sentence_size)
+        print("Set max sentence length", self.sentence_size)
         print("Longest candidate sentence length",
               self.candidate_sentence_size)
 
@@ -148,47 +155,61 @@ class chatBot(object):
         batches = zip(range(0, n_train - self.batch_size, self.batch_size),
                       range(self.batch_size, n_train, self.batch_size))
         batches = [(start, end) for start, end in batches]
-        best_validation_accuracy = 0
+        self.best_validation_perresponse = 0
+        self.best_validation_entity_f1 = 0
+        self.best_validation_bleu = 0
+        self.sample_output(trainS[:10], trainA[:10], trainA[:10])
 
         for t in range(1, self.epochs + 1):
             np.random.shuffle(batches)
             total_cost = 0.0
+            tic = datetime.datetime.now()
             for start, end in batches:
                 s = trainS[start:end]
                 a = trainA[start:end]
                 cost_t = self.model.batch_fit(s, a)
                 total_cost += cost_t
-
+            toc = datetime.datetime.now()
+            print("Epoch{} finished in {}".format(t,toc - tic))
             if t % self.evaluation_interval == 0:
                 train_preds = self.batch_predict(trainS, n_train)
                 val_preds = self.batch_predict(valS, n_val)
-                train_acc = metrics.bleu_score(
-                    np.array(train_preds), trainA)
-                val_acc = metrics.bleu_score(val_preds, valA)
                 self.sample_output(valS[:30], valA[:30], val_preds[:30])
+                # write summary
+                # train_acc_summary = tf.summary.scalar(
+                #     'task_' + str(self.task_id) + '/' + 'train_acc', tf.constant((train_acc), dtype=tf.float32))
+                # val_acc_summary = tf.summary.scalar(
+                #     'task_' + str(self.task_id) + '/' + 'val_acc', tf.constant((val_acc), dtype=tf.float32))
+                # merged_summary = tf.summary.merge(
+                #     [train_acc_summary, val_acc_summary])
+                # summary_str = self.sess.run(merged_summary)
+                # self.summary_writer.add_summary(summary_str, t)
+                # self.summary_writer.flush()
+
+                # if val_acc > best_validation_accuracy:
+                #     best_validation_accuracy = val_acc
+                    # self.saver.save(self.sess, self.model_dir +
+                    #                 'model.ckpt', global_step=t)
 
                 print('-----------------------')
                 print('Epoch', t)
-                print('Total Cost:', total_cost)
-                print('Training bleu:', train_acc)
-                print('Validation bleu:', val_acc)
+                self.eval_acc(train_preds[:100], trainA[:100], 'Training')
+                self.eval_acc(val_preds, valA, 'Validation')
+                print('Best Validation per_response_acc:{}, entity_f1_acc:{}, bleu_acc:{}'.format(
+                    self.best_validation_perresponse, self.best_validation_entity_f1, self.best_validation_bleu
+                ))
                 print('-----------------------')
 
-                # write summary
-                train_acc_summary = tf.summary.scalar(
-                    'task_' + str(self.task_id) + '/' + 'train_acc', tf.constant((train_acc), dtype=tf.float32))
-                val_acc_summary = tf.summary.scalar(
-                    'task_' + str(self.task_id) + '/' + 'val_acc', tf.constant((val_acc), dtype=tf.float32))
-                merged_summary = tf.summary.merge(
-                    [train_acc_summary, val_acc_summary])
-                summary_str = self.sess.run(merged_summary)
-                self.summary_writer.add_summary(summary_str, t)
-                self.summary_writer.flush()
-
-                if val_acc > best_validation_accuracy:
-                    best_validation_accuracy = val_acc
-                    self.saver.save(self.sess, self.model_dir +
-                                    'model.ckpt', global_step=t)
+    def eval_acc(self, preds, trues, mode='Training'):
+        assert mode in {'Training', 'Validation'}
+        per_response_acc = metrics.per_response(preds, trues)
+        entityf1_acc = metrics.entity_f1(preds, trues)
+        bleu_acc = metrics.bleu_score(preds, trues)
+        if mode == 'Validation':
+            self.best_validation_bleu = max(bleu_acc, self.best_validation_bleu)
+            self.best_validation_perresponse = max(per_response_acc, self.best_validation_perresponse)
+            self.best_validation_entity_f1 = max(entityf1_acc, self.best_validation_entity_f1)
+        print(mode + 'per_response_acc:{}, entityf1_acc:{}, bleu_acc:{}'.format(per_response_acc, entityf1_acc, bleu_acc))
 
     def test(self):
         ckpt = tf.train.get_checkpoint_state(self.model_dir)
@@ -199,13 +220,13 @@ class chatBot(object):
         if self.isInteractive:
             self.interactive()
         else:
-            testS, testQ, testA = vectorize_seq2seq(
+            testS, testA = vectorize_seq2seq_fix(
                 self.testData, self.word_idx, self.sentence_size, self.batch_size, self.candidate_sentence_size)
             n_test = len(testS)
             print("Testing Size", n_test)
             test_preds = self.batch_predict(testS, n_test)
-            test_acc = metrics.bleu_score(test_preds, testA)
-            print("Testing bleu:", test_acc)
+            self.sample_output(testS[:30], testA[:30], test_preds[:30])
+            self.eval_acc(test_preds, testA, 'Testing')
 
     def sample_output(self, H, S, A):
         for h, s, a in zip(H, S, A):
@@ -235,9 +256,7 @@ class chatBot(object):
 
 
 if __name__ == '__main__':
-    model_dir = "task" + str(FLAGS.task_id) + "_" + FLAGS.model_dir
-    if not os.path.exists(model_dir):
-        os.makedirs(model_dir)
+    model_dir = "task" + str(FLAGS.task_id)
     chatbot = chatBot(FLAGS.data_dir, model_dir, FLAGS.task_id,
                       isInteractive=FLAGS.interactive, batch_size=FLAGS.batch_size)
     # chatbot.run()

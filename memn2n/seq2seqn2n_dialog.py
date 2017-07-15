@@ -106,7 +106,7 @@ class SeqN2NDialog(object):
                  initializer=tf.random_normal_initializer(stddev=0.1),
                  optimizer=tf.train.AdamOptimizer(learning_rate=1e-2),
                  session=tf.Session(),
-                 name='MemN2N',
+                 name='SeqN2N',
                  candidate_size=15,
                  task_id=6):
         """Creates an End-To-End Memory Network
@@ -151,18 +151,19 @@ class SeqN2NDialog(object):
                                           str(task_id), 'summary_output', timestamp)
 
         # seq loss
-        logits = self._inference(self._stories, self._answers, self._is_training)
+        extended_answers = [tf.ones_like(self._answers[0]) * 2] + self._answers
+        go_answers = extended_answers[:-1]
+
+        logits = self._inference(self._stories, go_answers, self._is_training)
         self.logits = logits
         self.preds = tf.to_int32(tf.arg_max(logits, dimension=-1))
-        answers_T = tf.transpose(tf.stack(self._answers, 0))
+        answers_T = tf.transpose(tf.stack(extended_answers[1:], 0))
         self.istarget = tf.to_float(tf.not_equal(answers_T, 0))
-
         self.acc = tf.reduce_sum(tf.to_float(tf.equal(self.preds, answers_T)) * self.istarget) / (
             tf.reduce_sum(self.istarget))
         self.y_smoothed = label_smoothing(tf.one_hot(answers_T, depth=self._vocab_size))
         loss = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=self.y_smoothed)
         mean_loss = tf.reduce_sum(loss * self.istarget) / (tf.reduce_sum(self.istarget))
-
         # loss op
         loss_op = mean_loss
 
@@ -210,12 +211,14 @@ class SeqN2NDialog(object):
             logits,_ = tf.contrib.legacy_seq2seq.embedding_rnn_seq2seq(
                 stories, answers, encoDecoCell, self._vocab_size,
                 self._vocab_size, embedding_size=self._embedding_size,
+                feed_previous=tf.not_equal(is_training, True)
                 # output_projection=outputProjection.getWeights()
             )
 
         return tf.transpose(tf.stack(logits, 0), (1, 0, 2))
 
     def batch_fit(self, stories, answers, queries=None):
+        # TODO: need to add <S> token to the answer
         """Runs the training algorithm over the passed batch
         Args:
             stories: Tensor (None, sentence_size)
@@ -224,11 +227,12 @@ class SeqN2NDialog(object):
         Returns:
             loss: floating-point number, the loss computed for the batch
         """
-        stories = np.array(stories, dtype='int32').transpose()
+        stories = np.array(stories, dtype='int32').transpose()[::-1]
         answers = np.array(answers, dtype='int32').transpose()
 
         feed_dict = {self._stories[i]: stories[i] for i in range(self._sentence_size)}
         feed_dict.update({self._answers[i]: answers[i] for i in range(self._candidate_size)})
+        feed_dict.update({self._is_training: True})
         # feed_dict = {self._stories: stories, self._answers: answers, self._is_training: True}
 
         loss, _ = self._sess.run(
@@ -236,6 +240,7 @@ class SeqN2NDialog(object):
         return loss
 
     def predict(self, stories, queries=None):
+        # TODO: need to add <S> token to the answer
         """Predicts answers as one-hot encoding.
         Args:
             stories: Tensor (None, memory_size, sentence_size)
@@ -244,11 +249,11 @@ class SeqN2NDialog(object):
             answers: Tensor (None, vocab_size)
         """
         answers = np.zeros((len(stories), self._candidate_size), np.int32)
-        stories = np.array(stories, dtype='int32').transpose()
+        stories = np.array(stories, dtype='int32').transpose()[::-1]
         answers = np.array(answers, dtype='int32').transpose()
         feed_dict = {self._stories[i]: stories[i] for i in range(self._sentence_size)}
         feed_dict.update({self._answers[i]: answers[i] for i in range(self._candidate_size)})
-
+        feed_dict.update({self._is_training: False})
         return self._sess.run(self.predict_op, feed_dict=feed_dict)
 
 
@@ -285,6 +290,7 @@ class AttentionModelTest():
         loss = self.model.batch_fit(inputs, inputs2)
         # loss = self.model.predict(inputs)
         print(inputs2)
+        print()
         print(loss)
 
 if __name__ == '__main__':

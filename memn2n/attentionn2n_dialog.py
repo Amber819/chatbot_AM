@@ -67,10 +67,10 @@ class AttentionN2NDialog(object):
                  initializer=tf.random_normal_initializer(stddev=0.1),
                  optimizer=tf.train.AdamOptimizer(learning_rate=1e-2),
                  session=tf.Session(),
-                 name='MemN2N',
+                 name='AttentionN2N',
                  candidate_size=29,
                  task_id=6):
-        """Creates an End-To-End Memory Network
+        """Creates an End-To-End Full Attention Network
 
         Args:
             batch_size: The size of the batch.
@@ -127,6 +127,7 @@ class AttentionN2NDialog(object):
 
         # seq loss
         logits = self._inference(self._stories, self._answers, self._is_training)
+        # logits = self._rnn_inference(self._stories, self._answers)
         self.logits = logits
         self.preds = tf.to_int32(tf.arg_max(logits, dimension=-1))
         self.istarget = tf.to_float(tf.not_equal(self._answers, 0))
@@ -144,17 +145,19 @@ class AttentionN2NDialog(object):
         grads_and_vars = [(tf.clip_by_norm(g, self._max_grad_norm), v)
                           for g, v in grads_and_vars]
         grads_and_vars = [(add_gradient_noise(g), v) for g,v in grads_and_vars]
-        ngrads_and_vars = []
-        for g, v in grads_and_vars:
-            ngrads_and_vars.append((g, v))
+
         train_op = self._opt.apply_gradients(
-            ngrads_and_vars, name="train_op")
+            grads_and_vars, name="train_op")
 
         # predict ops
         self.predict_op = self.preds
 
         # assign ops
         self.loss_op = loss_op
+
+        # self.optimizer = tf.train.AdamOptimizer(learning_rate=0.001, beta1=0.9, beta2=0.98, epsilon=1e-8)
+        # train_op = self.optimizer.minimize(mean_loss)
+
         self.train_op = train_op
 
         self.graph_output = self.loss_op
@@ -169,20 +172,50 @@ class AttentionN2NDialog(object):
         self._is_training = tf.placeholder(tf.bool, shape=None, name='is_training')
 
     def _inference(self, stories, answers, is_training):
+        #  Encoder Embedding
+        self.enc = embedding(stories,
+                             vocab_size=self._vocab_size,
+                             num_units=self._embedding_size,
+                             scale=True,
+                             scope="embed")
+        ## Positional Encoding
+        self.enc += embedding(
+            tf.tile(tf.expand_dims(tf.range(tf.shape(stories)[1]), 0), [tf.shape(stories)[0], 1]),
+            vocab_size=self._sentence_size,
+            num_units=self._embedding_size,
+            zero_pad=False,
+            scale=False,
+            scope="enc_pe")
+
+        ## Dropout
+        self.enc = tf.layers.dropout(self.enc,
+                                     rate=self._dropout_rate,
+                                     training=is_training)
+
+        #  Decoder Embedding
+        self.decoder_inputs = tf.concat((tf.ones_like(answers[:, :1]) * 2, answers[:, :-1]), -1)  # 2:<S>
+        self.dec = embedding(self.decoder_inputs,
+                             vocab_size=self._vocab_size,
+                             num_units=self._embedding_size,
+                             scale=True,
+                             reuse=True,
+                             scope="embed")
+
+        ## Positional Encoding
+        self.dec += embedding(tf.tile(tf.expand_dims(tf.range(tf.shape(self.decoder_inputs)[1]), 0),
+                                      [tf.shape(self.decoder_inputs)[0], 1]),
+                              vocab_size=self._candidate_size,
+                              num_units=self._embedding_size,
+                              zero_pad=False,
+                              scale=False,
+                              scope="dec_pe")
+
+        ## Dropout
+        self.dec = tf.layers.dropout(self.dec,
+                                     rate=self._dropout_rate,
+                                     training=is_training)
 
         with tf.variable_scope("encoder"):
-            ## Embedding
-            self.enc = embedding(stories,
-                                 vocab_size=self._vocab_size,
-                                 num_units=self._embedding_size,
-                                 scale=True,
-                                 scope="enc_embed")
-
-            ## Dropout
-            self.enc = tf.layers.dropout(self.enc,
-                                         rate=self._dropout_rate,
-                                         training=is_training)
-
             ## Blocks
             for i in range(self._blocks):
                 with tf.variable_scope("num_blocks_{}".format(i)):
@@ -197,21 +230,9 @@ class AttentionN2NDialog(object):
 
                     ### Feed Forward
                     self.enc = feedforward(self.enc, num_units=[4 * self._embedding_size, self._embedding_size])
+
+
         with tf.variable_scope("decoder"):
-            ## Embedding
-            self.decoder_inputs = tf.concat((tf.ones_like(answers[:, :1]) * 2, answers[:, :-1]), -1)  # 2:<S>
-
-            self.dec = embedding(self.decoder_inputs,
-                                 vocab_size=self._vocab_size,
-                                 num_units=self._embedding_size,
-                                 scale=True,
-                                 scope="dec_embed")
-
-            ## Dropout
-            self.dec = tf.layers.dropout(self.dec,
-                                         rate=self._dropout_rate,
-                                         training=is_training)
-
             ## Blocks
             for i in range(self._blocks):
                 with tf.variable_scope("num_blocks_{}".format(i)):
@@ -240,6 +261,32 @@ class AttentionN2NDialog(object):
 
         logits = tf.layers.dense(self.dec, self._vocab_size)
         return logits
+
+    def _rnn_inference(self, stories, answers):
+        decoder_inputs = tf.concat((tf.ones_like(answers[:, :1]) * 2, answers[:, :-1]), -1)
+        embeddings = tf.Variable(tf.random_uniform([self._vocab_size, self._embedding_size], -1.0, 1.0), dtype=tf.float32)
+
+        encoder_inputs_embedded = tf.nn.embedding_lookup(embeddings, stories)
+        decoder_inputs_embedded = tf.nn.embedding_lookup(embeddings, decoder_inputs)
+
+        encoder_cell = tf.contrib.rnn.LSTMCell(self._embedding_size)
+
+        self.encoder_outputs, encoder_final_state = tf.nn.dynamic_rnn(
+            encoder_cell, encoder_inputs_embedded,
+            dtype=tf.float32, scope="plain_encoder"
+        )
+        decoder_cell = tf.contrib.rnn.LSTMCell(self._embedding_size)
+
+        decoder_outputs, decoder_final_state = tf.nn.dynamic_rnn(
+            decoder_cell, decoder_inputs_embedded,
+
+            initial_state=encoder_final_state,
+
+            dtype=tf.float32, scope="plain_decoder",
+        )
+
+        decoder_logits = tf.contrib.layers.linear(decoder_outputs, self._vocab_size)
+        return decoder_logits
 
     def batch_fit(self, stories, answers, queries=None):
         """Runs the training algorithm over the passed batch
@@ -272,21 +319,26 @@ class AttentionN2NDialog(object):
         """
         # TODO:split the \s symbol get right sentence indexes
         stories = np.matrix(stories, dtype='int32')
-        answers = np.zeros((stories.shape[0], self._candidate_size), np.int32)
-        feed_dict = {self._stories: stories, self._answers: answers, self._is_training: False}
-        return self._sess.run(self.predict_op, feed_dict=feed_dict)
+        ### Autoregressive inference
+        preds = np.zeros((stories.shape[0], self._candidate_size), np.int32)
+        for j in range(self._candidate_size):
+            feed_dict = {self._stories: stories, self._answers: preds, self._is_training: False}
+            _preds = self._sess.run(self.predict_op, feed_dict=feed_dict)
+            preds[:, j] = _preds[:, j]
+
+        return preds
 
 
-class AttentionModelTest(tf.test.TestCase):
+class AttentionModelTest():
     """
     Tests the UnidirectionalRNNEncoder class.
     """
 
-    def setUp(self):
-        super(AttentionModelTest, self).setUp()
+    def __init__(self):
+        # super(AttentionModelTest, self).setUp()
         rnn_encoder = AttentionN2NDialog
         self.batch_size = 10
-        self.sequence_length = 10
+        self.sequence_length = 15
         self.mode = tf.contrib.learn.ModeKeys.TRAIN
         self.params = rnn_encoder.default_params()
         self.model = AttentionN2NDialog(**self.params)
@@ -305,12 +357,12 @@ class AttentionModelTest(tf.test.TestCase):
 
     def test_batch_pred(self):
         inputs = np.random.random_integers(0, 30, [self.batch_size, self.sequence_length])
-        inputs2 = np.random.random_integers(0, 30, [self.batch_size, self.sequence_length])
-        # loss = self.model.batch_fit(inputs, inputs2)
-        loss = self.model.predict(inputs)
-        print(loss)
+        inputs2 = np.random.random_integers(0, 30, [self.batch_size, 29])
+        loss = self.model.batch_fit(inputs, inputs2)
+        # loss = self.model.predict(inputs)
+        print(loss.shape)
 
 if __name__ == '__main__':
-    # model = AttentionModelTest()
-    # model.test_batch_pred()
-    tf.test.main()
+    model = AttentionModelTest()
+    model.test_batch_pred()
+    # tf.test.main()

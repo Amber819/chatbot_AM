@@ -9,22 +9,28 @@ def entity_f1(test_preds, testA):
         pred_set = set(pred)
         a = a[:a.index(3)]
         true_set = set(a)
-        Precision = len(pred_set & true_set)/len(pred_set)
+        if len(pred_set) is 0:
+            Precision = 0
+        else:
+            Precision = len(pred_set & true_set)/len(pred_set)
         Recall = len(pred_set & true_set)/len(true_set)
-        scores.append(2*Precision*Recall/(Precision + Recall))
+        if Precision + Recall == 0:
+            scores.append(0.0)
+        else:
+            scores.append(2*Precision*Recall/(Precision + Recall))
     return np.mean(scores)
 
 
 def per_response(preds, answers):
     acc = 0.0
-    for i in len(preds):
+    for i in range(len(preds)):
         score = 1.0
         pred = preds[i]
         answer = answers[i][:answers[i].index(3)]
         if len(pred) != len(answer):
             score = 0.0
         else:
-            for j in len(pred):
+            for j in range(len(pred)):
                 if pred[j]!=answer[j]:
                     score = 0.0
                     break

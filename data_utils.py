@@ -86,7 +86,8 @@ def parse_dialogs_per_response(lines,candid_dic):
                 a = r
                 # temporal encoding, and utterance/response encoding
                 # data.append((context[:],u[:],candid_dic[' '.join(r)]))
-                data.append((context[:],u[:],a))
+                data.append((context[:], u[:], a))
+                # data.append((u[:], u[:], a))
                 context.append(u)
                 context.append(r)
             else:
@@ -141,7 +142,7 @@ def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, m
     A = []
     data.sort(key=lambda x:len(x[0]),reverse=True)
     for i, (story, query, answer) in enumerate(data):
-        if i%batch_size==0:
+        if i % batch_size == 0:
             memory_size=max(1,min(max_memory_size,len(story)))
         ss = []
         for i, sentence in enumerate(story, 1):
@@ -183,26 +184,24 @@ def vectorize_seq2seq(data, word_idx, sentence_size, batch_size, candidate_sente
     newdata = []
     for i, (story, query, answer) in enumerate(data):
         story.append(query)
-        mystory = reduce(lambda x, y: x + y, story)
-        ss = [word_idx[w] if w in word_idx else 1 for w in mystory]
+        ss = []
+        for sentence in story[::-1]:
+            if len(sentence) + len(ss) < sentence_size:
+                ss = [word_idx[w] if w in word_idx else 1 for w in sentence] + ss
+            else:
+                break
         newdata.append((ss, query, answer))
-    newdata.sort(key=lambda x: len(x[0]), reverse=True)
 
+    newdata.sort(key=lambda x: len(x[0]), reverse=True)
     for i, (story, query, answer) in enumerate(newdata):
-        if i%batch_size==0:
+        if i % batch_size == 0:
             memory_size=max(1,min(sentence_size,len(story)))
 
         # take only the most recent sentences that fit in memory
         ls = max(0, sentence_size - len(story))
         story.append(3)
         story = story + [0] * ls
-
         ss = story[::-1][:memory_size][::-1]
-
-        # pad to memory_size
-        lm = max(0, memory_size - len(ss))
-        ss += [0] * lm
-
         S.append(ss)
 
         answer.append('</S>')
@@ -230,8 +229,12 @@ def vectorize_seq2seq_fix(data, word_idx, sentence_size, batch_size, candidate_s
     newdata = []
     for i, (story, query, answer) in enumerate(data):
         story.append(query)
-        mystory = reduce(lambda x, y: x + y, story)
-        ss = [word_idx[w] if w in word_idx else 1 for w in mystory]
+        ss = []
+        for sentence in story[::-1]:
+            if len(sentence) + len(ss) < sentence_size:
+                ss = [word_idx[w] if w in word_idx else 1 for w in sentence] + ss
+            else:
+                break
         newdata.append((ss, query, answer))
     newdata.sort(key=lambda x: len(x[0]), reverse=True)
     memory_size = sentence_size
@@ -240,14 +243,7 @@ def vectorize_seq2seq_fix(data, word_idx, sentence_size, batch_size, candidate_s
         ls = max(0, sentence_size - len(story))
         story.append(3)
         story = story + [0] * ls
-
-        ss = story[::-1][:memory_size][::-1]
-
-        # pad to memory_size
-        lm = max(0, memory_size - len(ss))
-        ss += [0] * lm
-
-        S.append(ss)
+        S.append(story)
 
         answer.append('</S>')
         la = max(0, candidate_sentence_size - len(answer))
