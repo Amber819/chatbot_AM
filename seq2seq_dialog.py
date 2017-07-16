@@ -203,7 +203,7 @@ class chatBot(object):
     def eval_acc(self, preds, trues, mode='Training'):
         assert mode in {'Training', 'Validation'}
         per_response_acc = metrics.per_response(preds, trues)
-        entityf1_acc = metrics.entity_f1(preds, trues)
+        entityf1_acc = metrics.entity_f1(self.idx_word, preds, trues)
         bleu_acc = metrics.bleu_score(preds, trues)
         if mode == 'Validation':
             self.best_validation_bleu = max(bleu_acc, self.best_validation_bleu)
