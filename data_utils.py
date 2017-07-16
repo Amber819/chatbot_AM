@@ -165,6 +165,46 @@ def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, m
         A.append(np.array(answer))
     return S, Q, A
 
+def vectorize_attnNew(data, word_idx, sentence_size, candidates_size, max_memory_size):
+    """
+    Vectorize stories and queries.
+
+    If a sentence length < sentence_size, the sentence will be padded with 0's.
+
+    If a story length < memory_size, the story will be padded with empty memories.
+    Empty memories are 1-D arrays of length sentence_size filled with 0's.
+
+    The answer array is returned as a one-hot encoding.
+    """
+    S = []
+    Q = []
+    A = []
+    data.sort(key=lambda x:len(x[0]),reverse=True)
+    for i, (story, query, answer) in enumerate(data):
+        ss = []
+        for sentence in story[::-1]:
+            if len(sentence) + len(ss) <= max_memory_size:
+                ss = [word_idx[w] if w in word_idx else 1 for w in sentence] + ss
+            else:
+                break
+
+        ss.append(3)
+        ls = max(0, max_memory_size - len(ss))
+        ss = ss + [0] * ls
+
+        query.append('</S>')
+        lq = max(0, sentence_size - len(query))
+        q = [word_idx[w] if w in word_idx else 0 for w in query] + [0] * lq
+
+        answer.append('</S>')
+        la = max(0, candidates_size - len(answer))
+        a = [word_idx[w] if w in word_idx else 1 for w in answer[-candidate_sentence_size:]] + [0] * la
+
+        S.append(np.array(ss))
+        Q.append(np.array(q))
+        A.append(np.array(answer))
+    return S, Q, A
+
 
 def vectorize_seq2seq(data, word_idx, sentence_size, batch_size, candidate_sentence_size):
     """
