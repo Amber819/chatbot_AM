@@ -3,7 +3,7 @@ from __future__ import print_function
 
 from data_utils import load_dialog_task, vectorize_data, load_candidates, vectorize_candidates, vectorize_candidates_sparse, tokenize
 from sklearn import metrics
-from memn2n import MemN2NDialog
+from memn2n import AttentionN2NDialog
 from itertools import chain
 from six.moves import range, reduce
 import sys
@@ -72,8 +72,8 @@ class chatBot(object):
         optimizer = tf.train.AdamOptimizer(
             learning_rate=self.learning_rate, epsilon=self.epsilon)
         self.sess = tf.Session()
-        self.model = MemN2NDialog(self.batch_size, self.vocab_size, self.n_cand, self.sentence_size, self.embedding_size, self.candidates_vec, session=self.sess,
-                                  hops=self.hops, max_grad_norm=self.max_grad_norm, optimizer=optimizer, task_id=task_id)
+        self.model = AttentionN2NDialog(self.batch_size, self.vocab_size, self.n_cand, self.sentence_size, self.embedding_size, self.candidates_vec, session=self.sess,
+                                        hops=self.hops, max_grad_norm=self.max_grad_norm, optimizer=optimizer, task_id=task_id)
         self.saver = tf.train.Saver(max_to_keep=50)
 
         self.summary_writer = tf.summary.FileWriter(
@@ -110,7 +110,7 @@ class chatBot(object):
         r = None
         nid = 1
         while True:
-            line = raw_input('--> ').strip().lower()
+            line = input('--> ').strip().lower()
             if line == 'exit':
                 break
             if line == 'restart':
