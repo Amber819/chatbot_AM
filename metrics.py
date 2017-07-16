@@ -54,7 +54,6 @@ def entity_f1(id2word,test_preds, testA):
             scores.append(0.0)
         else:
             scores.append(2*Precision*Recall/(Precision + Recall))
-        print ('len of scores:',len(scores))
     return np.mean(scores)
 
 
